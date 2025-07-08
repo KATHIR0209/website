@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cesium 2D Map with Boundaries and Right-Side Tools</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <style>
+    html, body, #cesiumContainer {
+  width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden;
+}
+
+.cesium-viewer-bottom,
+.cesium-credit-textContainer,
+.cesium-credit-logoContainer {
+  display: none !important;
+}
+
+/* ✅ Drawing Tool Panel – LEFT TOP */
+#drawPanel {
+  position: absolute;
+  top: 10px;
+  left: 10px;  /* 👈 moved from right to left */
+  background: white;
+  padding: 10px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#drawPanel button {
+  width: 40px;
+  height: 30px;
+  border: none;
+  background: white;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+#drawPanel button:hover {
+  background: #e6f0ff;
+}
+
+/* ✅ Map Layer Toggle – RIGHT BOTTOM */
+#layerToggle {
+  position: absolute;
+  bottom: 20px;
+  right: 10px;
+  background: white;
+  padding: 10px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+  font-size: 13px;
+  z-index: 999;
+}
+
+/* Optional: Feature List Above Layer Toggle */
+#entityList {
+  position: absolute;
+  top:280px;
+  left: 10px;
+  background: white;
+  padding: 10px;
+  border-radius: 8px;
+  width: 180px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 998;
+}
+    #drawPanel button.active {
+  background-color: #cce0ff;
+  border: 2px solid #3399ff;
+}
+
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <!-- Right-side Layer Toggle -->
+  <div id="layerToggle">
+    <strong>Map Layers:</strong><br>
+    <label><input type="checkbox" id="countryLayerCB" checked> Country</label><br>
+    <label><input type="checkbox" id="stateLayerCB" checked> States</label><br>
+    <label><input type="checkbox" id="districtLayerCB" checked> Districts</label><br>
+    <label><input type="checkbox" id="ndviLayerCB" > NDVI</label>
+  </div>
+<div id="ndviLegend" style="
+  position: absolute;
+  bottom: 100px;
+  left: 10px;
+  background: white;
+  padding: 10px;
+  border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+  display: none;
+  z-index: 999;
+  font-size: 12px;
+">
+  <strong>NDVI Legend</strong><br>
+  <img src="https://raw.githubusercontent.com/selvansdev/legend-images/main/ndvi-legend.png" width="150" />
+</div>
+
+  <!-- Right-side Drawing Tools -->
+  <div id="drawPanel">
+  <button id="btnPoint" title="Draw Point">📍</button>
+  <button id="btnLine" title="Draw Line">📏</button>
+  <button id="btnPolygon" title="Draw Polygon">🔺</button>
+  <button id="btnSelect" title="Select Feature">🤏</button>
+  <button id="btnClear" title="Clear All">🗑️</button>
+
+  </div>
+
+  <!-- Drawn Features List -->
+  <div id="entityList"><strong>Drawn Features:</strong><div id="featureList"></div></div>
+
+
+  <script>
+    Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIyNGNlMGVhOC1kNzhkLTQ4NjQtYjAwNC02NDI5OTMzOTc1OTciLCJpZCI6MzE3MzEwLCJpYXQiOjE3NTE4NzAxMDh9.MUvYCW_o350NfPs7G0scn6U14JcT-MCx_ZBFT-We2OM';
+
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      sceneMode: Cesium.SceneMode.SCENE2D,
+      sceneModePicker: false,
+      baseLayerPicker: true,
+      animation: false,
+      timeline: false,
+      terrain: null
+    });
+
+    const indiaView = {
+      destination: Cesium.Cartesian3.fromDegrees(78.9629, 22.5937, 10000000)
+    };
+    viewer.camera.flyTo(indiaView);
+
+    viewer.homeButton.viewModel.command.beforeExecute.addEventListener(e => {
+      e.cancel = true;
+      viewer.camera.flyTo(indiaView);
+    });
+
+    let countryLayer, stateLayer, districtLayer;
+
+    function cleanGeoJSON(geojson) {
+      return geojson.features.filter(f => {
+        const geom = f.geometry;
+        if (!geom || !geom.coordinates) return false;
+        const coords = geom.coordinates;
+        const validateRing = (ring) => new Set(ring.map(p => JSON.stringify(p))).size > 1;
+        if (geom.type === 'Polygon') return coords.every(validateRing);
+        if (geom.type === 'MultiPolygon') return coords.every(p => p.every(validateRing));
+        if (geom.type === 'LineString') return new Set(coords.map(p => JSON.stringify(p))).size > 1;
+        return true;
+      });
+    }
+
+    // Load Country Boundary
+    fetch('https://raw.githubusercontent.com/datameet/maps/master/Country/india-osm.geojson')
+      .then(res => res.json())
+      .then(geojson => {
+        geojson.features = cleanGeoJSON(geojson);
+        return Cesium.GeoJsonDataSource.load(geojson, {
+          stroke: Cesium.Color.ORANGE,
+          fill: Cesium.Color.TRANSPARENT,
+          strokeWidth: 2,
+          clampToGround: false
+        });
+      })
+      .then(ds => {
+        viewer.dataSources.add(ds);
+        countryLayer = ds;
+      });
+
+    // Load State Boundaries (Cesium Ion)
+    Cesium.IonResource.fromAssetId(3522173).then(resource => {
+      Cesium.GeoJsonDataSource.load(resource, {
+        stroke: Cesium.Color.LIME,
+        fill: Cesium.Color.TRANSPARENT,
+        strokeWidth: 2,
+        clampToGround: false
+      }).then(ds => {
+        viewer.dataSources.add(ds);
+        stateLayer = ds;
+      });
+    });
+
+    // Load District Boundaries
+    Cesium.GeoJsonDataSource.load(
+      'https://raw.githubusercontent.com/datameet/maps/master/parliamentary-constituencies/india_pc_2019_simplified.geojson',
+      {
+        stroke: Cesium.Color.CYAN,
+        fill: Cesium.Color.TRANSPARENT,
+        strokeWidth: 1,
+        clampToGround: false
+      }
+    ).then(ds => {
+      viewer.dataSources.add(ds);
+      districtLayer = ds;
+    });
+    
+    let ndviLayer;
+
+document.getElementById('ndviLayerCB').addEventListener('change', async (e) => {
+  const show = e.target.checked;
+  const legendDiv = document.getElementById('ndviLegend');
+
+  if (show) {
+    if (!ndviLayer) {
+      // Load NDVI from Cesium Ion (replace with your asset ID if different)
+      const resource = await Cesium.IonResource.fromAssetId(3521651);
+      ndviLayer = await Cesium.KmlDataSource.load(resource, {
+        camera: viewer.scene.camera,
+        canvas: viewer.scene.canvas
+      });
+      viewer.dataSources.add(ndviLayer);
+    } else {
+      ndviLayer.show = true;
+    }
+    legendDiv.style.display = 'block';
+  } else {
+    if (ndviLayer) ndviLayer.show = false;
+    legendDiv.style.display = 'none';
+  }
+});
+
+
+    // Toggle Layers
+    document.getElementById('countryLayerCB').addEventListener('change', e => {
+      if (countryLayer) countryLayer.show = e.target.checked;
+    });
+    document.getElementById('stateLayerCB').addEventListener('change', e => {
+      if (stateLayer) stateLayer.show = e.target.checked;
+    });
+    document.getElementById('districtLayerCB').addEventListener('change', e => {
+      if (districtLayer) districtLayer.show = e.target.checked;
+    });
+
+    // Drawing Tools Logic
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    const drawings = [];
+    let tempPoints = [], activeShape = null;
+
+    function updateEntityList() {
+      const list = document.getElementById('featureList');
+      list.innerHTML = '';
+      drawings.forEach((ent, i) => {
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.onchange = () => ent.show = cb.checked;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(`Feature ${i+1}`));
+        list.appendChild(label);
+      });
+    }
+function formatCoord(cartesian) {
+  const carto = Cesium.Cartographic.fromCartesian(cartesian);
+  const lon = Cesium.Math.toDegrees(carto.longitude).toFixed(5);
+  const lat = Cesium.Math.toDegrees(carto.latitude).toFixed(5);
+  return `(${lat}, ${lon})`;
+}
+
+function computeDistance(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    total += Cesium.Cartesian3.distance(points[i - 1], points[i]);
+  }
+  return (total / 1000).toFixed(2) + ' km';
+}
+
+function computeArea(positions) {
+  const carto = positions.map(p => Cesium.Cartographic.fromCartesian(p));
+  const radiansToDegrees = Cesium.Math.toDegrees;
+  const coordinates = carto.map(c => [radiansToDegrees(c.longitude), radiansToDegrees(c.latitude)]);
+  let area = 0;
+
+  for (let i = 0; i < coordinates.length; i++) {
+    const [x1, y1] = coordinates[i];
+    const [x2, y2] = coordinates[(i + 1) % coordinates.length];
+    area += (x1 * y2 - x2 * y1);
+  }
+  return (Math.abs(area * 111 * 111) / 2).toFixed(2) + ' km²'; // approx.
+}
+    function addEntity(ent) {
+  drawings.push(ent);
+
+  const list = document.getElementById('featureList');
+  const label = document.createElement('label');
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = true;
+  cb.onchange = () => ent.show = cb.checked;
+
+  label.appendChild(cb);
+
+  let info = 'Feature';
+
+  if (ent.point) {
+    info = `Point ${drawings.length}: ${formatCoord(ent.position._value)}`;
+  } else if (ent.polyline) {
+    const len = computeDistance(ent.polyline.positions.getValue());
+    info = `Line ${drawings.length}: ${len}`;
+  } else if (ent.polygon) {
+    const hierarchy = ent.polygon.hierarchy.getValue();
+    const area = computeArea(hierarchy.positions);
+    info = `Polygon ${drawings.length}: ${area}`;
+  }
+
+  // Make text clickable to select and highlight
+  const span = document.createElement('span');
+  span.textContent = ' ' + info;
+  span.style.cursor = 'pointer';
+  span.onclick = () => highlightEntity(ent);
+
+  label.appendChild(span);
+  list.appendChild(label);
+}
+
+
+    function resetHandlers() {
+      handler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK);
+      handler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+      tempPoints = [];
+      if (activeShape) viewer.entities.remove(activeShape);
+      activeShape = null;
+    }
+
+    function clearDrawings() {
+      drawings.forEach(e => viewer.entities.remove(e));
+      drawings.length = 0;
+      updateEntityList();
+    }
+
+    function drawPoint() {
+      handler.setInputAction(click => {
+        const ray = viewer.camera.getPickRay(click.position);
+        const pos = viewer.scene.globe.pick(ray, viewer.scene);
+
+        if (pos) {
+          const point = viewer.entities.add({
+            position: pos,
+            point: { pixelSize: 10, color: Cesium.Color.RED }
+          });
+          addEntity(point);
+        }
+      }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+    }
+
+    function drawLine() {
+      tempPoints = [];
+      handler.setInputAction(click => {
+        const ray = viewer.camera.getPickRay(click.position);
+        const pos = viewer.scene.globe.pick(ray, viewer.scene);
+        if (!pos) return;
+        tempPoints.push(pos);
+        if (tempPoints.length === 2) {
+          const line = viewer.entities.add({
+            polyline: {
+              positions: tempPoints,
+              width: 3,
+              material: Cesium.Color.BLUE
+            }
+          });
+          addEntity(line);
+          tempPoints = [];
+        }
+      }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+    }
+    function selectEntity() {
+  handler.setInputAction(click => {
+    const pickedObject = viewer.scene.pick(click.position);
+    if (Cesium.defined(pickedObject) && pickedObject.id && drawings.includes(pickedObject.id)) {
+      highlightEntity(pickedObject.id);
+    }
+  }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+}
+
+function highlightEntity(ent) {
+  // Reset styles of all
+  drawings.forEach(d => {
+    if (d.point) d.point.color = Cesium.Color.RED;
+    if (d.polyline) d.polyline.material = Cesium.Color.BLUE;
+    if (d.polygon) d.polygon.material = Cesium.Color.GREEN.withAlpha(0.4);
+  });
+
+  // Apply highlight
+  if (ent.point) ent.point.color = Cesium.Color.YELLOW;
+  if (ent.polyline) ent.polyline.material = Cesium.Color.YELLOW;
+  if (ent.polygon) ent.polygon.material = Cesium.Color.YELLOW.withAlpha(0.6);
+}
+    function setActiveButton(buttonId) {
+  const buttons = document.querySelectorAll('#drawPanel button');
+  buttons.forEach(btn => btn.classList.remove('active'));
+  const activeBtn = document.getElementById(buttonId);
+  if (activeBtn) activeBtn.classList.add('active');
+}
+
+
+    function drawPolygon() {
+      tempPoints = [];
+      handler.setInputAction(click => {
+        const ray = viewer.camera.getPickRay(click.position);
+        const pos = viewer.scene.globe.pick(ray, viewer.scene);
+        if (!pos) return;
+        tempPoints.push(pos);
+        if (tempPoints.length >= 3) {
+          if (activeShape) viewer.entities.remove(activeShape);
+          activeShape = viewer.entities.add({
+            polygon: {
+              hierarchy: new Cesium.CallbackProperty(() => new Cesium.PolygonHierarchy(tempPoints), false),
+              material: Cesium.Color.GREEN.withAlpha(0.4),
+              outline: true
+            }
+          });
+        }
+      }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+      handler.setInputAction(() => {
+        if (activeShape) {
+          addEntity(activeShape);
+          activeShape = null;
+        }
+        tempPoints = [];
+      }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    }
+
+   document.getElementById('btnPoint').onclick = () => {
+  resetHandlers(); drawPoint(); setActiveButton('btnPoint');
+};
+document.getElementById('btnLine').onclick = () => {
+  resetHandlers(); drawLine(); setActiveButton('btnLine');
+};
+document.getElementById('btnPolygon').onclick = () => {
+  resetHandlers(); drawPolygon(); setActiveButton('btnPolygon');
+};
+document.getElementById('btnSelect').onclick = () => {
+  resetHandlers(); selectEntity(); setActiveButton('btnSelect');
+};
+document.getElementById('btnClear').onclick = () => {
+  resetHandlers(); clearDrawings(); setActiveButton('btnClear');
+};
+
+  </script>
+</body>
+</html>
